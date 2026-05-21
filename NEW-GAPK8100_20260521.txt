@@ -1,0 +1,609 @@
+================================================================================
+  NEW-GAPK8100 SDK 분석 자료
+  작성일: 2026-05-21
+  대상 경로: /home/changyong/NEW-GAPK8100 (spf131/qsdk)
+  비교 참조: /home/changyong/GAPK-8100-13.1_4 (spf13.1/qsdk)
+================================================================================
+
+목차
+----
+  1. 환경 및 프로젝트 개요
+  2. NEW-GAPK8100 vs GAPK-8100-13.1_4 비교
+  3. 빌드 / 프로필 / 파티션
+  4. Device Tree (GAPK 보드)
+  5. RTL8251 — Linux Kernel (rtk-ms-phy)
+  6. RTL8251 — qca-ssdk
+  7. ESS port 2 ↔ USXGMII ↔ RTL8251 연동 추적
+  8. RTL8251 제거 시 Device Tree 주석 처리 가이드
+  9. Git 커밋 (KAON onboard)
+  10. 핵심 파일 체크리스트
+  11. RTL8366U — Linux 드라이버 및 qca-ssdk 연동
+  12. qca-ssdk 개요 / 8366 SSDK 통합 / WAN·LAN / 8251 제거+8366 WAN 가이드
+
+================================================================================
+1. 환경 및 프로젝트 개요
+================================================================================
+
+서버
+  - Host: 10.1.1.249 (SSH alias: dev249)
+  - User: changyong
+  - 메인 트리: /home/changyong/NEW-GAPK8100
+
+Git
+  - 브랜치: spf13.1u1-dev-onboard-dts
+  - SDK 폴더: spf131 (비교 트리는 spf13.1)
+
+빌드
+  - kaon_build.sh (813줄), model GAPK-8100
+  - SRC_ROOT_DIR=spf131
+  - profiles/GAPK-8100.profile — STORAGE_TYPES=emmc
+  - OpenWrt 타깃: ipq53xx / ipq53xx_32 / QSDK_Premium
+
+주요 DTS
+  - spf131/qsdk/target/linux/feeds/files-6.6/arch/arm64/boot/dts/qcom/
+      ipq5332-rdp442.dts
+      ipq5332_kaon.dtsi
+
+================================================================================
+2. NEW-GAPK8100 vs GAPK-8100-13.1_4 비교
+================================================================================
+
+항목                    NEW-GAPK8100              GAPK-8100-13.1_4
+------------------------------------------------------------------------
+브랜치                  spf13.1u1-dev-onboard-dts spf13.1-onboard_soki
+kaon_build.sh           813줄, golden/prebuilt    578줄
+qsdk.config             있음 (~360KB)             없음
+빌드 잔여               적음                      build_dir, .config 등
+DTS rdp442/kaon         내용 다름 (~2174줄 diff)  —
+flash_partition/        동일                      동일
+qca-ssdk realtek_phy.c  동일 (diff 0줄)           동일
+
+================================================================================
+3. 빌드 / 프로필 / 파티션
+================================================================================
+
+eMMC 파티션
+  - STORAGE_TYPES=emmc
+  - spf131/meta-tools-oss/ipq5332/flash_partition/emmc-partition.xml
+  - KAON: kaondata, rootfs, 0:HLOS, 0:WIFIFW 등
+
+================================================================================
+4. Device Tree (GAPK 보드) — RTL8251 / LAN-WAN 구조
+================================================================================
+
+파일: ipq5332-rdp442.dts
+
+ESS 스위치 (ess-switch@3a000000)
+  switch_cpu_bmp = <0x1>;
+  switch_lan_bmp   = <0x2>;   /* bit1 → physical port 1 (RTL8366U uplink) */
+  switch_wan_bmp   = <0x4>;   /* bit2 → physical port 2 (RTL8251L WAN) */
+  switch_mac_mode  = <0xd>;   /* uniphy instance0: USXGMII (enum 13) */
+  switch_mac_mode1 = <0xd>;   /* uniphy instance1: USXGMII — RTL8251 경로 */
+  switch_mac_mode2 = <0xff>;  /* uniphy instance2: 비활성 */
+
+qcom,port_phyinfo
+  port@0
+    port_id = <1>;
+    forced-speed = <10000>;
+    switch_external → switch1 (realtek,rtl8366u), switch_cpu_port = <0>;
+  port@1  /* RTL8251L */
+    mdiobus = <&mdio1>;
+    port_id = <2>;
+    phy_address = <4>;
+    link-intr-gpio = <&tlmm 43 GPIO_ACTIVE_LOW>;
+    ethernet-phy-ieee802.3-c45;
+
+mdio1 (GPIO bitbang MDIO)
+  compatible = "virtual,mdio-gpio";
+  phy-reset-gpio = <&tlmm 44>;
+  gpios: MDC=tlmm29, MDIO=tlmm30;
+  phy0: ethernet-phy@1
+    reg = <4>;
+    compatible = "ethernet-phy-id001C.CAF3", "ethernet-phy-ieee802.3-c45";
+
+aliases
+  mdio-gpio0 = &mdio1;
+  ethernet1 = "/soc/dp2";
+
+dp2 (NSS WAN datapath)
+  compatible = "qcom,nss-dp";
+  phy-mode = "usxgmii";
+  qcom,id = <1>;
+
+LAN 스위치 (별도)
+  switch1: compatible = "realtek,rtl8366u";
+  mdio-bus = <&mdio>;  /* 내장 MDIO, RTL8251 mdio1과 별개 */
+
+================================================================================
+5. RTL8251 — Linux Kernel (rtk-ms-phy)
+================================================================================
+
+경로: spf131/qsdk/qca/src/linux-6.6/drivers/net/phy/rtk/
+
+모듈
+  - rtk-ms-phy.ko
+  - CONFIG_RTK_MSSDK_PHY=y (target/linux/feeds/ipq53xx/config-6.6)
+
+식별
+  - 별도 rtl8251.c 없음
+  - PHY_ID 0x001CCAF3 (= RTL8261N OUI/ID) 로 probe
+  - MMD 0x103 == 0x8251 이면 RTK_PHYLIB_RTL8251L 로 분기
+
+주요 파일
+  - rtk_phy.c, rtk_phylib*.c, rtk_phy_proc.c (/proc/driver/rtl8251)
+
+역할
+  - netdev 쪽 PHY 드라이버, 8251L 칩 리비전 구분
+  - MDIO bus (mdio1) 에서 phy@4 로 바인딩
+
+================================================================================
+6. RTL8251 — qca-ssdk
+================================================================================
+
+경로: spf131/qsdk/qca/src/qca-ssdk/
+
+문자열 "rtl8251" / "RTL8251"
+  - qca-ssdk 소스 내 직접 문자열 거의 없음
+  - PHY ID 0x001CCAF3 (REALTEK_PHY_8261N) 로 동일 계열 처리
+
+핵심 파일
+  src/hsl/phy/realtek_phy.c          (~3011줄, KAON //soki 커스텀 다수)
+  include/hsl/phy/realtek_phy.h      PHY_ID_RTL8261N 0x001CCAF3
+  src/hsl/phy/hsl_phy.c              REALTEK_PHY_8261N → REALTEK_PHY_CHIP
+  include/hsl/phy/hsl_phy.h          REALTEK_PHY_8261N, REALTEK_PHY_8264B
+  mk/obj.mk                          realtek_phy.o 빌드
+  src/init/ssdk_dts.c                qcom,port_phyinfo 파싱
+
+PHY 타입 매핑 (hsl_phy.c)
+  case REALTEK_PHY_8261N:
+  case REALTEK_PHY_8264B:
+      phytype = REALTEK_PHY_CHIP;
+  ssdk_phy_driver[]:
+      {REALTEK_PHY_CHIP, {0}, NULL, realtek_phy_init, NULL},
+
+Probe 흐름
+  ssdk_dts: port_phyinfo → phy_address=4, C45, mdiobus
+  hsl_phyid_get(port2) → MDIO read → 0x001CCAF3
+  hsl_phytype_get_by_phyid → REALTEK_PHY_CHIP
+  realtek_phy_init() → realtek_phy_api_ops_init()
+    (link, speed, duplex, reset, interface_mode_status 등)
+
+realtek_phy_interface_get_mode_status
+  serdes page mode 13 (USXGMII) / 31 → PORT_USXGMII 반환
+  SSDK MAC/uniphy와 serdes 모드 동기화에 사용
+
+Git (qca-ssdk)
+  7bde77bdf5  onboard: enable rtl8251 support in qca-ssdk
+              (hsl_phy.h/c, obj.mk, adpt_hppe_portctrl.c 등)
+  b6d79ff890  onboard: add realtek phy implementation for qca-ssdk
+              (realtek_phy.c/h 추가)
+
+NEW vs GAPK-8100-13.1_4
+  realtek_phy.c: diff 0줄 (동일)
+  DTS switch_mac_mode1, port2 phyinfo: 동일
+
+역할 분담
+  DTS          → GPIO MDIO, phy_address=4, 001C.CAF3
+  Linux rtk    → 8251L 리비전, netdev PHY
+  qca-ssdk     → ESS port 제어, MDIO C45, uniphy/MAC 연동
+  rtl8366u     → LAN 스위치 (SSDK Realtek PHY와 무관)
+
+================================================================================
+7. ESS port 2 ↔ USXGMII ↔ RTL8251 연동 추적
+================================================================================
+
+7.1 포트 / Uniphy 매핑 (MPPE = ipq5332)
+--------------------------------------
+  SSDK_PHYSICAL_PORT2 = 2
+  hsl_port_to_uniphy(port 2)     → SSDK_UNIPHY_INSTANCE1  (#ifdef MPPE)
+  adpt_hppe_port_get_by_uniphy(1) → SSDK_PHYSICAL_PORT2
+
+  PORT_WRAPPER_USXGMII = 13 = DTS switch_mac_mode1 값 0xd
+
+7.2 DTS → SSDK 초기화
+---------------------
+  ssdk_dt_parse_mac_mode()
+    switch_mac_mode1 → cfg->mac_mode1 = 0xd
+  ssdk_dts port_phyinfo
+    phy_address → hsl_phy_address_init(dev, 2, addr 4)
+    ethernet-phy-ieee802.3-c45 → PHY_F 설정
+  ssdk_dt_get_port_mode(dev, 2)
+    uniphy1 mac_mode 0xd → hsl_uniphy_mode_to_port_mode → PORT_USXGMII
+  switch_wan_bmp 0x4 → port 2 WAN bitmap
+
+7.3 Uniphy / MAC (adpt_hppe)
+----------------------------
+  adpt_hppe_uniphy_mode_set(index=1, PORT_WRAPPER_USXGMII)
+    → __adpt_hppe_uniphy_usxgmii_mode_set()
+    → XPCS usxg_en=1, 클럭 312MHz
+
+  adpt_hppe_port_mux_mac_type_set()
+    port 2: mode_tmp = mode1 (uniphy instance1)
+    PORT_WRAPPER_USXGMII:
+      qca_hppe_port_mac_type_set(PORT_XGMAC_TYPE)
+      _adpt_hppe_port_interface_mode_set(PORT_USXGMII)
+
+  _adpt_hppe_port_phy_status_get(port 2)
+    → hppe_port_phy_status_0_port2_phy_status_get()
+
+7.4 interface_mode_apply
+------------------------
+  adpt_hppe_port_interface_mode_apply()
+    mode_old[] = ssdk_dt_global_get_mac_mode()  /* DTS 0xd */
+    mode_new[] = _adpt_hppe_instance_mode_get()
+      instance1: phy_info->port_mode[2] → PORT_WRAPPER_USXGMII 등
+    mode 변경 시 adpt_hppe_port_mac_uniphy_phy_config()
+      → adpt_hppe_uniphy_mode_set + adpt_hppe_port_mux_mac_type_set
+
+7.5 런타임 (링크 동기화)
+------------------------
+  qca_mac_sw_sync_work_task (1초)
+    → qca_hppe_mac_sw_sync_task()
+    → port 2 link up/down
+    → adpt_hppe_phy_interface_mode_switch()
+    → realtek_phy_interface_get_mode_status / interface_mode_apply
+  WAN down 로그: #SOKI WAN DOWN (adpt_hppe_portctrl.c)
+
+7.6 데이터 경로 요약
+--------------------
+  [WAN 케이블] → RTL8251L (MDIO addr 4, mdio1 GPIO)
+       ↔ USXGMII serdes
+       ↔ ESS UNIPHY instance1
+       ↔ ESS physical port 2 (wan_bmp 0x4)
+       ↔ dp2 (NSS, phy-mode usxgmii)
+  [LAN] → RTL8366U (switch1) ↔ ESS port 1 (port@0, 10G forced)
+
+================================================================================
+8. RTL8251 제거 시 Device Tree 주석 처리 가이드
+================================================================================
+
+가능 여부: 가능. 관련 블록을 함께 비활성화할 것 (한 곳만 주석 시 SSDK/USXGMII 오류 가능).
+
+필수 변경 (ipq5332-rdp442.dts)
+------------------------------
+1) mdio1 + phy0 전체
+   #if 0 /* RTL8251L removed */
+   mdio1: bitbang-mdio { ... phy0 ethernet-phy-id001C.CAF3 ... };
+   #endif
+
+2) aliases
+   #if 0
+   mdio-gpio0 = &mdio1;
+   #endif
+
+3) qcom,port_phyinfo port@1 (RTL8251)
+   port@0 (8366U) 유지
+   port@1 #if 0 ... #endif
+
+4) ESS bitmap / uniphy1
+   switch_wan_bmp = <0x0>;      /* 기존 0x4 */
+   switch_mac_mode1 = <0xff>;  /* 기존 0xd, PORT_WRAPPER_MAX */
+
+5) dp2 (WAN NSS 인터페이스 제거 시)
+   dp2 { status = "disabled"; ... };
+   aliases ethernet1 주석
+
+선택
+----
+  LED phy0tx trigger 변경
+  CONFIG_RTK_MSSDK_PHY=n (커널 재빌드, 용량 절감)
+  OpenWrt WAN 네트워크 설정 정리
+
+유지 (LAN)
+----------
+  switch1 rtl8366u, port@0, switch_lan_bmp, switch_mac_mode (port1 경로)
+
+주의
+----
+  WAN이 RTL8251 전용이면 유선 WAN 소실. LAN(8366U)은 영향 없음.
+  switch_mac_mode1=0xd 만 남기고 phyinfo 만 제거하면 uniphy만 USXGMII로 올라
+  PHY 없이 SSDK 오류 가능 → switch_mac_mode1=0xff 필수.
+
+================================================================================
+9. Git 커밋 참고 (onboard / KAON)
+================================================================================
+
+Linux PHY
+  onboard: add rtl8251 phy driver support (rtk import QSDK 12.4 등)
+
+qca-ssdk
+  7bde77bdf5  onboard: enable rtl8251 support in qca-ssdk
+  b6d79ff890  onboard: add realtek phy implementation for qca-ssdk
+
+DTS
+  onboard: import GAPK8100 DTS, only compile 442 등
+
+================================================================================
+10. 핵심 파일 체크리스트
+================================================================================
+
+[프로젝트]
+  /home/changyong/NEW-GAPK8100/kaon_build.sh
+  /home/changyong/NEW-GAPK8100/profiles/GAPK-8100.profile
+
+[DTS]
+  spf131/qsdk/target/linux/feeds/files-6.6/arch/arm64/boot/dts/qcom/ipq5332-rdp442.dts
+  spf131/qsdk/target/linux/feeds/files-6.6/arch/arm64/boot/dts/qcom/ipq5332_kaon.dtsi
+
+[파티션]
+  spf131/meta-tools-oss/ipq5332/flash_partition/emmc-partition.xml
+
+[Linux RTL8251]
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/phy/rtk/rtk_phy.c
+  spf131/qsdk/target/linux/feeds/ipq53xx/config-6.6  (CONFIG_RTK_MSSDK_PHY)
+
+[qca-ssdk Realtek / Port]
+  spf131/qsdk/qca/src/qca-ssdk/src/hsl/phy/realtek_phy.c
+  spf131/qsdk/qca/src/qca-ssdk/include/hsl/phy/realtek_phy.h
+  spf131/qsdk/qca/src/qca-ssdk/src/hsl/phy/hsl_phy.c
+  spf131/qsdk/qca/src/qca-ssdk/include/hsl/phy/hsl_phy.h
+  spf131/qsdk/qca/src/qca-ssdk/src/init/ssdk_dts.c
+  spf131/qsdk/qca/src/qca-ssdk/src/adpt/hppe/adpt_hppe_portctrl.c
+  spf131/qsdk/qca/src/qca-ssdk/src/adpt/hppe/adpt_hppe_uniphy.c
+  spf131/qsdk/qca/src/qca-ssdk/include/init/ssdk_init.h  (PORT_WRAPPER_* enum)
+  spf131/qsdk/qca/src/qca-ssdk/mk/obj.mk
+
+[Linux RTL8366U LAN Switch]
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/src/kaon/rtl8366_module.c
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/src/kaon/init.c
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/src/dal/rtl8373/dal_rtl8373_switch.c
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/src/dal/rtl8373/rtl8373_smi.c
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/phy/mdio_bus.c  (rtk_mdiobus_*)
+  spf131/qsdk/target/linux/feeds/ipq53xx/config-6.6  (CONFIG_RTL_RTL8366U)
+
+================================================================================
+11. RTL8366U — Linux 드라이버 및 qca-ssdk 연동
+================================================================================
+
+GAPK-8100에서 RTL8366U는 RTL8251(외부 WAN PHY)과 달리 별도의 Realtek SDK 커널
+드라이버로 동작한다. upstream DSA rtl8366rb가 아니라 KAON 전용
+drivers/net/ethernet/rtl8366u/ 경로를 사용한다.
+
+11.1 보드에서의 역할
+--------------------
+항목              RTL8366U                    RTL8251L
+------------------------------------------------------------------------
+역할              LAN 4포트 스위치             WAN 유선 PHY
+DTS 노드          switch1: ess-switch1@1      mdio1 + port_phyinfo port@1
+ESS 연결          port@0 switch_external       ESS port 2 (USXGMII)
+                  (ESS port 1, 10G)           (WAN)
+드라이버          CONFIG_RTL_RTL8366U         CONFIG_RTK_MSSDK_PHY
+
+DTS (ipq5332-rdp442.dts):
+  switch1: ess-switch1@1 {
+    compatible = "realtek,rtl8366u";
+    device_id = <1>;
+    switch_access_mode = "mdio";
+    mdio-bus = <&mdio>;
+  };
+
+  qcom,port_phyinfo port@0 {
+    port_id = <1>;
+    forced-speed = <10000>;
+    forced-duplex = <1>;
+    switch_external {
+      switch_handle = <&switch1>;
+      switch_cpu_port = <0>;
+    };
+  };
+
+  switch_lan_bmp = <0x2>;   /* bit1 → ESS physical port 1 (8366 uplink) */
+  switch_wan_bmp = <0x4>;   /* bit2 → RTL8251 WAN (별도) */
+
+ESS 본체 (ipq5332_kaon.dtsi):
+  ess-switch@3a000000 { compatible = "qcom,ess-switch-ipq53xx"; ... }
+
+11.2 Linux 드라이버 구조
+------------------------
+경로:
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/
+    src/kaon/           KAON 플랫폼/proc/IRQ/초기화
+    src/dal/rtl8373/    Realtek DAL (8366U = RTL8373 계열 CHIP_RTL8366U_MODE)
+    Makefile            -DGAPK8100_ENABLE -DCONFIG_KAON_QCA -DMDC_MDIO_OPERATION
+
+커널 설정:
+  CONFIG_RTL_RTL8366U=y  (target/linux/feeds/ipq53xx/config-6.6)
+  모듈: rtl8366u.ko (RTK SDK + DAL 통합 단일 모듈)
+
+Platform 드라이버 (rtl8366_module.c):
+  compatible     = "realtek,rtl8366u"
+  probe          → mdio-bus phandle → rtk_smibus = of_mdio_find_bus()
+  초기화         → rtk_all_module_init() → rtl8366u_init() (DAL)
+  IRQ            → GPIO 512+32 ("rtl8366_int"), 링크/상태 이벤트
+  char device    → register_chrdev + ioctl (KAON 커스텀)
+
+MDIO / SMI 접근:
+  - MDC_MDIO_OPERATION: QCA MDIO 버스로 SMI 터널
+  - rtl8373_smi.c: MDC_MDIO_PHY_ID = 0
+    → rtk_mdiobus_read/write(rtk_smibus, phyID, reg)
+  - mdio_bus.c (KAON 패치): rtk_mdiobus_* 함수
+  - DTS &mdio (qcom,qca-mdio):
+      rtlphy0: ethernet-phy@0 { reg = <0>; }
+  → RTL8251(mdio1, addr 4)과 버스·주소 모두 다름
+
+칩 초기화 (init.c / dal_rtl8373_switch.c):
+  - rtl8366u_init(): Ver8366U 리비전, serdes reset, MDI polarity 등
+  - rtk_all_module_init() [GAPK8100_ENABLE]:
+      Serdes port 3: SERDES_10GUSXG, 10G forced → ESS uplink
+      Port 4/5: 1G/2.5G autoneg (LAN 포트)
+      LED, rtk_int_init, rtk_rldp_init, thermal(tm_init) 등
+
+11.3 qca-ssdk 연동
+------------------
+8366U 패킷 스위칭은 SSDK realtek_phy가 아님. SSDK는 ESS port 1만 제어.
+
+ssdk_dts.c — switch_external 파싱:
+  - ESS port_id=1 ↔ switch_handle=&switch1
+  - switch_cpu_port=0 (8366 CPU port)
+  - netdev_switch 테이블 등록
+  - /sys/ssdk/switch_external, VLAN/ERP 연동 가능
+
+데이터 경로:
+  [LAN 케이블] → RTL8366U port 4/5
+       ↔ 내부 switching
+       ↔ Serdes port 3 (10G USXG, forced)
+       ↔ ESS physical port 1 (switch_lan_bmp 0x2, 10G USXGMII)
+       ↔ IPQ5332 NSS/bridge
+  [WAN] → RTL8251 (ESS port 2) — 8366과 독립
+
+11.4 KAON 커스텀 기능
+---------------------
+  rtl83xx_interrupt.c   — 링크 IRQ, LAN1~4 상태 (GAPK8100_ENABLE)
+  rtl83xx_proc*.c       — 통계, RLDP, QoS, L2, healthcheck
+  rtl83xx_sysfs.c       — sysfs 인터페이스
+  heartbeat.c           — heartbeat
+  rtl8366_module.c      — char dev, ioctl, GPIO IRQ
+
+GAPK8100_ENABLE 시 rtl8366_port_info:
+  lan1_info, lan2_info, lan3_info, lan4_info (4 LAN 포트 상태)
+
+11.5 upstream rtl8366rb DSA와의 차이
+------------------------------------
+OpenWrt kmod-switch-rtl8366rb/smi 등 패키지는 있으나 GAPK 빌드는 미사용.
+
+  upstream: drivers/net/phy/rtl8366rb.c + DSA → lan1, lan2 netdev
+  GAPK:     drivers/net/ethernet/rtl8366u/ + RTK SDK
+            → proc/ioctl/char dev 중심, 표준 DSA netdev 없음
+
+11.6 RTL8251 vs RTL8366U 비교
+-----------------------------
+항목           RTL8251              RTL8366U
+------------------------------------------------------------------------
+드라이버 위치  drivers/net/phy/rtk/ drivers/net/ethernet/rtl8366u/
+qca-ssdk       realtek_phy.c        switch_external 메타만
+MDIO           mdio1 GPIO, addr 4   mdio QCA, addr 0 (SMI)
+ESS port       2 (WAN)              1 (LAN uplink 10G)
+제어 API       PHY ops              RTK SDK + proc/ioctl
+
+11.7 RTL8366U 제거 시 DTS 가이드 (참고)
+---------------------------------------
+LAN 스위치 비활성화 시:
+  1. switch1 / ess-switch1@1 노드 #if 0 또는 status = "disabled"
+  2. port_phyinfo port@0 의 switch_external 블록 제거
+  3. switch_lan_bmp = <0x0> 등 조정
+  4. CONFIG_RTL_RTL8366U=n (커널 재빌드)
+  5. LAN bridge/네트워크 스크립트 정리
+  ※ RTL8251(WAN) 제거와 독립 — WAN=8251, LAN=8366
+
+================================================================================
+12. qca-ssdk 개요 / 8366 SSDK 통합 / WAN·LAN / 8251 제거+8366 WAN 가이드
+================================================================================
+
+12.1 qca-ssdk란 (요약)
+----------------------
+Qualcomm Switch SDK — IPQ53xx 내장 ESS(PPE) 스위치·MAC·Uniphy를 제어하는 커널 모듈.
+
+  [사용자] ssdk_shell, swconfig, sysfs (/sys/ssdk/)
+       ↕
+  [FAL]  fal_port_*, fal_vlan_*, fal_acl_* …
+       ↕
+  [ADPT] adpt_hppe_* (ipq53xx)
+       ↕
+  [HSL]  레지스터, MDIO, Uniphy, PHY 드라이버 (realtek_phy, aquantia_phy …)
+       ↕
+  [ESS]  SoC 내장 스위치
+
+초기화: ssdk_probe → ssdk_dts.c (DTS) → fal_init → ssdk_phy_driver_init
+
+GAPK에서 역할:
+  - ESS port·bitmap·USXGMII/SGMII (switch_mac_mode*)
+  - 외부 PHY(8251): realtek_phy.c
+  - 외부 스위치(8366): switch_external 메타만 (실제 제어는 rtl8366u.ko)
+
+8251/8366과 구분:
+  qca-ssdk     → SoC ESS 포트·uplink 연동
+  rtk-ms-phy   → RTL8251 (netdev PHY)
+  rtl8366u.ko  → RTL8366 패킷 스위칭·포트 init
+
+12.2 RTL8251 제거 후 RTL8366을 qca-ssdk 드라이버로 넣을 수 있는가?
+----------------------------------------------------------------
+결론: realtek_phy.c처럼 SSDK HSL에 8366을 “추가”하는 방식은 사실상 불가.
+
+이유:
+  - 8251 = 단일 포트 10G PHY (ESS port 2, USXGMII)
+  - 8366 = 다포트 LAN 스위치 (ESS port 1 uplink, port 3 serdes 10G)
+  - qca-ssdk hsl/phy/ 에 8366/8373 스위치 HAL 없음 (8366 문자열 미검색)
+  - 8366은 switch_external + 별도 rtl8366u.ko (RTK DAL 수천 줄)로 이미 연동됨
+  - Qualcomm SSDK에 RTL8366 드라이버 샘플 없음 → FAL/HSL 이식은 자체 대규모 개발
+
+시나리오별:
+  | 목적                         | 가능?     | 방법                          |
+  |------------------------------|-----------|-------------------------------|
+  | 8251만 제거, LAN 유지        | 가능      | DTS 8절 가이드, 8366 유지     |
+  | 8366을 SSDK 내부로 통합      | 비현실적  | DAL 이식                      |
+  | 8366은 switch_external 유지  | 이미 동작 | 추가 작업 불필요              |
+  | WAN을 8366 RJ45로            | 재설계    | 12.3·12.4 참고 (SSDK 추가 아님)|
+
+12.3 RTL8366 포트를 WAN / LAN으로 쓸 수 있는가?
+-----------------------------------------------
+칩/스위치 레벨: 가능 (VLAN, port isolation, ACL — RTK SDK vlan/isolation API)
+
+GAPK-8100 현재 설계:
+  [WAN] RTL8251 → USXGMII → ESS port 2 (switch_wan_bmp=0x4, dp2/eth1)
+  [LAN] RTL8366 port 4~7 → fabric → port 3 (10G serdes) → ESS port 1
+
+  8366 port 0     : CPU (switch_cpu_port=0)
+  8366 port 3     : SoC uplink 10G forced (init.c SERDES_10GUSXG)
+  8366 port 4~7   : 사용자 포트 — GAPK8100은 전부 LAN (rtl83xx_interrupt.c)
+  GAPK7700 참고   : port 4=WAN, port 5~7=LAN (wan_info 사용)
+
+제한:
+  - DSA 미사용 → 포트별 wan/lan netdev 없음 (proc/ioctl/char dev)
+  - OpenWrt 기본: eth0=LAN, eth1=WAN(8251)
+  - 8366 WAN 시 속도: port4 ~2.5G, port5 init상 1G (8251 10G 대체 아님)
+  - 회로도: WAN 잭이 8366 어느 port에 연결됐는지 확인 필수
+
+12.4 8251 제거 + 8366 port4=WAN / port5~7=LAN — 수정 포인트 (짧은 가이드)
+--------------------------------------------------------------------------
+
+[DTS] ipq5332-rdp442.dts
+  mdio1 + phy0 (8251)              → #if 0
+  port_phyinfo port@1 (8251)       → #if 0
+  switch_wan_bmp                   → <0x0> (또는 uplink만 WAN이면 port1 검토)
+  switch_mac_mode1                 → <0xff>
+  dp2 / ethernet1                  → disabled 또는 주석
+  port@0 (8366 uplink)             → 유지 (switch_external, 10G forced)
+
+[rtl8366u] spf131/.../drivers/net/ethernet/rtl8366u/src/kaon/
+  rtl83xx_interrupt.c              GAPK8100: 7700 패턴 — port4=wan_info, 5~7=lan1~3
+  init.c                           port4 WAN autoneg; port5~7 LAN; VLAN/isolation 추가
+  vlan.c / acl.c                   WAN VLAN / 포트 멤버·격리 (필요 시)
+
+[ESS / qca-ssdk]
+  realtek_phy                      DTS 제거로 미로딩
+  switch_wan_bmp                   ESS WAN을 port1(8366 uplink) 기준 재정의 검토
+  NSS dp2                          비활성 시 WAN datapath를 dp1/eth0 쪽으로 이동
+
+[OpenWrt]
+  profiles/GAPK-8100.profile, board.d, /etc/config/network, firewall
+  WAN 인터페이스: eth1(8251) → 8366 uplink 경로; LAN=bridge
+
+[커널 config 선택]
+  CONFIG_RTK_MSSDK_PHY=n
+  CONFIG_RTL_RTL8366U=y 유지
+
+[검증 순서]
+  1. 부팅: 8366 init, port3 10G link, port4 WAN link
+  2. dmesg: [WAN] / [LANx] (interrupt)
+  3. proc/VLAN: isolation 동작
+  4. WAN DHCP, LAN↔WAN 직접 브리지 차단 확인
+
+[주의]
+  - WAN RJ45 = 8366 port4 회로 확인
+  - 최대 ~2.5G WAN (port4), port5는 1G 제한 — 10G 8251 대체 아님
+  - DSA 없음 → VLAN + 상위 인터페이스 1개 구조로 설계
+
+12.5 관련 파일 (12절 체크리스트)
+---------------------------------
+  spf131/qsdk/target/linux/feeds/files-6.6/arch/arm64/boot/dts/qcom/ipq5332-rdp442.dts
+  spf131/qsdk/qca/src/qca-ssdk/src/init/ssdk_dts.c
+  spf131/qsdk/qca/src/qca-ssdk/src/hsl/phy/realtek_phy.c
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/src/kaon/init.c
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/src/kaon/rtl83xx_interrupt.c
+  spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/src/kaon/vlan.c
+  profiles/GAPK-8100.profile
+  target/linux/feeds/ipq53xx/config-6.6
+
+================================================================================
+문서 끝
+================================================================================
