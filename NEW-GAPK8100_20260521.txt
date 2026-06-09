@@ -21,6 +21,7 @@
   12. qca-ssdk 개요 / 8366 SSDK 통합 / WAN·LAN / 8251 제거+8366 WAN 가이드
   13. eMMC 부팅 / U-Boot → Linux DTB 전달 (mmc@7804000)
       13.12 eMMC 관련 GPIO (Linux / U-Boot, GPIO_8~13)
+  14. eMMC → SPI NAND 교체 (Winbond W25N04LWZEIG, gpio8~13)
 
 ================================================================================
 1. 환경 및 프로젝트 개요
@@ -961,6 +962,191 @@ GAPK-8100 현재 설계:
 
     eMMC GPIO = TLMM GPIO_8~13 (SDC mux 6핀), Linux/U-Boot 동일.
     카드감지·전원·리셋용 별도 GPIO 없음. NAND QSPI 와 핀 공유.
+
+================================================================================
+14. eMMC → SPI NAND 교체 (Winbond W25N04LWZEIG, gpio8~13)
+================================================================================
+
+  작성·검증: 2026-06-09 (NEW-GAPK8100 소스 + W25N04LWZEIG 데이터시트)
+
+  요약
+  ----
+    - 대상 칩: Winbond W25N04LWZEIG (4Gb = 512MB, 4K page SPI NAND, 1.8V)
+    - GPIO gpio8~13 핀맵 동일, TLMM mux 만 SDC → QSPI 로 전환
+    - STORAGE_TYPES="nand-4k" (2K page nand 가 아님)
+    - U-Boot W25N04LW (ID EF B2 23) 4K 테이블 SDK 에 존재
+    - Linux qcom_nandc 는 기동 후 writesize=4096 확인 필요
+
+14.1 칩 사양 ↔ SDK 매칭
+-----------------------
+
+  | 항목        | W25N04LWZEIG              | SDK / 설정                          |
+  |-------------|---------------------------|-------------------------------------|
+  | 용량        | 4Gb = 512MB               | nand-4k-partition.xml, memory 512   |
+  | Page        | 4096 + 256 byte           | STORAGE_TYPES="nand-4k"             |
+  | Block       | 256KB (typ.)              | UBI m4096-p256KiB                   |
+  | JEDEC ID    | 0xEF 0xB2 0x23            | U-Boot qti_nand.c "W25N04LW"        |
+  | 전압        | 1.7 ~ 1.95V               | 보드 1.8V IO (eMMC 와 동일)         |
+  | 인터페이스  | SPI / Dual / Quad         | gpio8~13 QSPI mux                   |
+  | On-die ECC  | 8-bit                     | NAND_ECC_INFO(8, 512)               |
+
+  ※ W25N04KW (2K page, ID EF BA 23) 와 혼동 금지
+    KW → STORAGE_TYPES="nand"
+    LW → STORAGE_TYPES="nand-4k"
+
+14.2 GPIO / pinctrl (변경 없음)
+-------------------------------
+
+  | GPIO  | eMMC (현재) | W25N04LW (교체 후) |
+  |-------|-------------|---------------------|
+  | gpio13| sdc_clk     | qspi_clk            |
+  | gpio12| sdc_cmd     | qspi_cs             |
+  | gpio8 | sdc_data0   | qspi_data0          |
+  | gpio9 | sdc_data1   | qspi_data1          |
+  | gpio10| sdc_data2   | qspi_data2          |
+  | gpio11| sdc_data3   | qspi_data3          |
+
+  Linux: qspi_default_state (ipq5332-rdp442.dts)
+  U-Boot: qspi_pinmux (ipq5332-default.dts)
+  → GPIO 번호 수정 불필요, mux 만 QSPI
+
+14.3 프로필 / 빌드 변경 (필수)
+------------------------------
+
+  [profiles/GAPK-8100.profile]
+    변경 전: STORAGE_TYPES="emmc"
+    변경 후: STORAGE_TYPES="nand-4k"
+
+  [profiles/GAPK-8100.qsdk.config — U-Boot]
+    OFF:
+      CONFIG_DEFAULT_uboot-2025-ipq5332-mmc32=y
+      CONFIG_PACKAGE_uboot-2025-ipq5332-mmc32=y
+    ON (512MB급 — nand32_64M 은 64MB 칩용):
+      CONFIG_DEFAULT_uboot-2025-ipq5332-nand32=y
+      CONFIG_PACKAGE_uboot-2025-ipq5332-nand32=y
+
+  [플래시 이미지 / 파티션]
+    | eMMC (현재)              | W25N04LW                    |
+    |--------------------------|-----------------------------|
+    | emmc-partition.xml       | nand-4k-partition.xml       |
+    | emmc-ipq5332-single.img  | nand-4k-ipq5332-single.img  |
+    | UBI m2048-p128KiB        | UBI m4096-p256KiB           |
+
+  CDT / partition MBN 생성 시 --memory 512 (512MB).
+
+14.4 Linux DTS (ipq5332-rdp442.dts)
+-----------------------------------
+
+  &sdhc {
+      status = "disabled";          /* eMMC OFF */
+  };
+
+  &qpic_nand {
+      pinctrl-0 = <&qspi_default_state>;
+      status = "okay";
+
+      nandcs@0 {
+          reg = <0>;
+          nand-ecc-strength = <8>;
+          nand-ecc-step-size = <512>;  /* QPIC codeword (Qualcomm 표준) */
+          nand-bus-width = <8>;
+      };
+  };
+
+  ※ nand-ecc-step-size=512 은 page 4096 과 다른 QPIC codeword 단위.
+    실제 page 4096 은 드라이버/칩 ID 테이블에서 결정.
+
+14.5 U-Boot DTS (선택)
+----------------------
+
+  ipq5332-rdp442.dts → #include ipq5332-default.dts
+  NAND 전용 보드면 mmc 노드 비활성화 권장:
+    mmc: sdhci@7800000 { status = "disabled"; };
+
+14.6 드라이버 / 칩 ID 테이블
+----------------------------
+
+  [U-Boot — OK] spf131/qsdk/qca/src/u-boot/drivers/mtd/nand/raw/qti_nand.c
+    {"W25N04LW", { .id = {0xef, 0xb2, 0x23} },
+      SZ_4K, SZ_512, SZ_256K, QUAD_MODE, 3, 256,
+      NAND_ECC_INFO(8, SZ_512), 0},
+
+  [Linux — 확인 필요] spf131/qsdk/.../drivers/mtd/nand/raw/qcom_nandc.c
+    qspinand_flash_ids_2k[] 에 W25N04LW 가 SZ_2K 로만 등록됨.
+    Linux 기동 후 반드시 확인:
+      dmesg | grep -iE 'nand|W25N04|writesize|QPIC'
+    writesize=4096 이어야 정상. 2048 이면 4K ID 테이블 패치 필요.
+
+14.7 부팅 / 런타임 차이 (eMMC vs NAND)
+---------------------------------------
+
+  | 항목       | eMMC (현재)                    | W25N04LW NAND                |
+  |------------|--------------------------------|------------------------------|
+  | SMEM       | SMEM_BOOT_MMC_FLASH            | SMEM_BOOT_QSPI_NAND_FLASH    |
+  | U-Boot     | boot_mmc() / 0:HLOS FIT        | boot_nand() / UBI kernel     |
+  | root       | root=PARTUUID=... gpt          | mtdparts=nand0 + UBI/UBIFS   |
+  | 블록장치   | mmcblk0 / GPT                 | mtd0 / UBI volume            |
+  | overlay    | ext4 on mmc 파티션           | UBIFS                        |
+  | WiFi FW    | mmcblk0p19                     | UBI volume (파티션 XML 확인) |
+
+  U-Boot ipq_fdt_fixup_flash():
+    eMMC 부팅: mmc@7804000 → okay, nand@79b0000 → disabled
+    NAND 부팅: Linux DTS 기본값(qpic_nand okay, sdhc disabled) 그대로 사용
+
+  제조/플래시: NAND partition MBN + CDT 재생성 후 전체 재플래시 필요.
+
+14.8 eMMC → NAND 전환 체크리스트
+---------------------------------
+
+  [하드웨어]
+    □ W25N04LWZEIG 납땜 (gpio8~13, 1.8V)
+    □ eMMC 제거
+
+  [프로필 / 빌드]
+    □ STORAGE_TYPES="nand-4k"
+    □ uboot mmc32 → nand32
+    □ nand-4k-partition.xml
+    □ nand-4k-ipq5332-single.img
+    □ CDT/MBN --memory 512
+
+  [DTS — GPIO 번호 변경 없음]
+    □ &sdhc disabled
+    □ &qpic_nand okay + qspi_default_state
+    □ (선택) U-Boot mmc disabled
+
+  [검증]
+    □ U-Boot: nand info, chip ID = ef b2 23
+    □ Linux: writesize=4096, UBI mount, rootfs 기동
+    □ (필요 시) qcom_nandc.c 4K ID 테이블 패치
+
+14.9 관련 파일
+--------------
+
+  [프로필]
+    profiles/GAPK-8100.profile
+    profiles/GAPK-8100.qsdk.config
+
+  [파티션]
+    spf131/meta-tools-oss/ipq5332/flash_partition/nand-4k-partition.xml
+    spf131/common/build/ipq/scripts/gen_flash_partition_bin.py
+
+  [DTS]
+    spf131/qsdk/qca/src/linux-6.6/arch/arm64/boot/dts/qcom/ipq5332-rdp442.dts
+    spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332-default.dts
+
+  [드라이버]
+    spf131/qsdk/qca/src/u-boot/drivers/mtd/nand/raw/qti_nand.c
+    spf131/qsdk/qca/src/linux-6.6/drivers/mtd/nand/raw/qcom_nandc.c
+
+  [U-Boot 부팅]
+    spf131/qsdk/qca/src/u-boot/board/qti/common/cmd_bootipq.c
+    spf131/qsdk/qca/src/u-boot/board/qti/common/fdt_fixup.c
+
+14.10 한 줄 정리
+----------------
+
+  W25N04LWZEIG = 512MB / 4K page → STORAGE_TYPES="nand-4k" + uboot-nand32
+  + nand-4k-partition.xml. gpio8~13 QSPI mux 동일. Linux qcom_nandc 4K 인식 확인.
 
 ================================================================================
 문서 끝
