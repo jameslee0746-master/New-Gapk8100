@@ -20,6 +20,7 @@
   11. RTL8366U — Linux 드라이버 및 qca-ssdk 연동
   12. qca-ssdk 개요 / 8366 SSDK 통합 / WAN·LAN / 8251 제거+8366 WAN 가이드
   13. eMMC 부팅 / U-Boot → Linux DTB 전달 (mmc@7804000)
+      13.12 eMMC 관련 GPIO (Linux / U-Boot, GPIO_8~13)
 
 ================================================================================
 1. 환경 및 프로젝트 개요
@@ -797,6 +798,8 @@ GAPK-8100 현재 설계:
   [U-Boot]
     spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332.dtsi
     spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332-rdp442.dts
+    spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332-default.dts
+    spf131/qsdk/qca/src/u-boot/drivers/pinctrl/qti/pinctrl-ipq5332.c
     spf131/qsdk/qca/src/u-boot/board/qti/common/cmd_bootipq.c
     spf131/qsdk/qca/src/u-boot/board/qti/common/fdt_fixup.c
     spf131/qsdk/qca/src/u-boot/board/qti/ipq5332/ipq5332.h
@@ -825,6 +828,139 @@ GAPK-8100 현재 설계:
 
   Linux 소스 sdhc disabled ≠ eMMC 미지원
   = 멀티 플래시 보드용 중립 DTS + U-Boot 런타임 선택
+
+13.12 eMMC 관련 GPIO (Linux / U-Boot, GPIO_8~13)
+-------------------------------------------------
+
+  작성·검증: 2026-06-09 (NEW-GAPK8100 소스 분석)
+
+  요약
+  ----
+    - eMMC 신호는 TLMM GPIO_8 ~ GPIO_13 (Linux: gpio8~13) 6핀, 4-bit bus
+    - Linux / U-Boot 모두 동일 물리 핀, pinctrl function 만 표기 방식 다름
+    - cd-gpios / reset-gpios / vmmc-supply 등 별도 GPIO 없음 (non-removable)
+    - GPIO_8~13 은 NAND QSPI 와 핀 공유 — eMMC 부팅 시 SDC mux, NAND 시 QSPI mux
+
+  13.12.1 Linux (ipq5332-rdp442.dts)
+  ----------------------------------
+
+    &sdhc {
+      bus-width = <4>;
+      max-frequency = <192000000>;
+      mmc-ddr-1_8v;
+      mmc-hs200-1_8v;
+      non-removable;
+      pinctrl-0 = <&sdc_default_state>;
+      pinctrl-names = "default";
+      status = "disabled";   /* U-Boot fixup 으로 runtime okay (13.7 참고) */
+    };
+
+    sdc_default_state (ipq5332-rdp442.dts &tlmm):
+
+    | TLMM GPIO | function  | 용도   | drive / bias      |
+    |-----------|-----------|--------|-------------------|
+    | gpio13    | sdc_clk   | CLK    | 8mA, bias-disable |
+    | gpio12    | sdc_cmd   | CMD    | 8mA, pull-up      |
+    | gpio11    | sdc_data3 | DATA3  | 8mA, pull-up      |
+    | gpio10    | sdc_data2 | DATA2  | 8mA, pull-up      |
+    | gpio9     | sdc_data1 | DATA1  | 8mA, pull-up      |
+    | gpio8     | sdc_data0 | DATA0  | 8mA, pull-up      |
+
+    ※ Linux sdhc 노드에 cd-gpios, wp-gpios, reset-gpios, vmmc-supply 없음
+    ※ pwr_irq (GIC SPI 316) 는 SDHCI 컨트롤러 내부 IRQ, GPIO 아님
+
+  13.12.2 U-Boot (ipq5332-default.dts → ipq5332-rdp442.dts include)
+  -----------------------------------------------------------------
+
+    GAPK U-Boot DT 구조:
+      ipq5332-rdp442.dts
+        └── #include "ipq5332-default.dts"   ← eMMC/QSPI pinmux 정의
+              └── #include "ipq5332.dtsi"     ← mmc controller (reg 0x7804000)
+
+    sdhci_pinmux (ipq5332-default.dts, tlmm):
+
+    | TLMM GPIO | U-Boot DTS | function | 용도  | drive / bias      |
+    |-----------|------------|----------|-------|-------------------|
+    | GPIO_13   | emmc_clk   | sdc      | CLK   | 8mA, bias-disable |
+    | GPIO_12   | emmc_cmd   | sdc      | CMD   | 8mA, pull-up      |
+    | GPIO_11   | emmc_data  | sdc      | DATA3 | 8mA, pull-up      |
+    | GPIO_10   | emmc_data  | sdc      | DATA2 | 8mA, pull-up      |
+    | GPIO_9    | emmc_data  | sdc      | DATA1 | 8mA, pull-up      |
+    | GPIO_8    | emmc_data  | sdc      | DATA0 | 8mA, pull-up      |
+
+    적용:
+      mmc: sdhci@7800000 {
+        pinctrl-names = "default";
+        pinctrl-0 = <&sdhci_pinmux>;
+        status = "okay";
+      };
+
+    pinctrl 드라이버 (drivers/pinctrl/qti/pinctrl-ipq5332.c):
+      function "sdc"  → TLMM mux value 1
+      function "qspi" → TLMM mux value 2
+
+    U-Boot mmc 노드 (ipq5332.dtsi) 추가 속성:
+      non-removable
+      bus-width = <4>
+      mmc-ddr-1_8v
+      bus_pwr_off_rst   ← SDHCI POWER_CONTROL 레지스터 제어 (GPIO 아님)
+      cd-gpios / reset-gpios / vmmc GPIO 없음
+
+  13.12.3 Linux vs U-Boot GPIO 비교
+  ---------------------------------
+
+    | 항목           | Linux                    | U-Boot                    |
+    |----------------|--------------------------|---------------------------|
+    | CLK            | gpio13 / sdc_clk         | GPIO_13 / sdc             |
+    | CMD            | gpio12 / sdc_cmd         | GPIO_12 / sdc             |
+    | DATA           | gpio8~11 / sdc_data      | GPIO_8~11 / sdc           |
+    | pinctrl 그룹   | sdc_default_state        | sdhci_pinmux (emmc_*)     |
+    | 핀 이름 표기   | gpio8 (소문자)           | GPIO_8 (동일 물리 핀)     |
+    | 별도 GPIO      | 없음                     | 없음                      |
+
+  13.12.4 NAND QSPI 와 핀 공유 (Linux / U-Boot 공통)
+  --------------------------------------------------
+
+    동일 GPIO_8~13 이 플래시 종류에 따라 mux 가 바뀜.
+
+    | GPIO   | eMMC (SDC)     | NAND (QSPI)   |
+    |--------|----------------|---------------|
+    | 13     | sdc_clk        | qspi_clk      |
+    | 12     | sdc_cmd        | qspi_cs       |
+    | 8~11   | sdc_data       | qspi_data     |
+
+    Linux (ipq5332-rdp442.dts &tlmm):
+      sdc_default_state  → eMMC
+      qspi_default_state → NAND  (gpio13=clk, gpio12=cs, gpio8~11=data)
+
+    U-Boot (ipq5332-default.dts):
+      sdhci_pinmux → mmc 노드 pinctrl-0
+      qspi_pinmux  → nand-controller pinctrl-0
+
+    GAPK-8100 (STORAGE_TYPES=emmc):
+      bootipq → SMEM_BOOT_MMC_FLASH → MMC probe 시 sdhci_pinmux 적용
+      Linux 런타임: sdc_default_state (U-Boot fixup 후 sdhc okay)
+
+  13.12.5 관련 파일 (GPIO)
+  ------------------------
+
+    [Linux DTS]
+      spf131/qsdk/qca/src/linux-6.6/arch/arm64/boot/dts/qcom/ipq5332-rdp442.dts
+        (&sdhc, sdc_default_state, qspi_default_state)
+
+    [U-Boot DTS]
+      spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332-rdp442.dts
+      spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332-default.dts  ← sdhci_pinmux
+      spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332.dtsi
+
+    [U-Boot pinctrl]
+      spf131/qsdk/qca/src/u-boot/drivers/pinctrl/qti/pinctrl-ipq5332.c
+
+  13.12.6 한 줄 정리
+  ------------------
+
+    eMMC GPIO = TLMM GPIO_8~13 (SDC mux 6핀), Linux/U-Boot 동일.
+    카드감지·전원·리셋용 별도 GPIO 없음. NAND QSPI 와 핀 공유.
 
 ================================================================================
 문서 끝
