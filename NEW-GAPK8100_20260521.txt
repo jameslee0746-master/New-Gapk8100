@@ -19,6 +19,7 @@
   10. 핵심 파일 체크리스트
   11. RTL8366U — Linux 드라이버 및 qca-ssdk 연동
   12. qca-ssdk 개요 / 8366 SSDK 통합 / WAN·LAN / 8251 제거+8366 WAN 가이드
+  13. eMMC 부팅 / U-Boot → Linux DTB 전달 (mmc@7804000)
 
 ================================================================================
 1. 환경 및 프로젝트 개요
@@ -603,6 +604,227 @@ GAPK-8100 현재 설계:
   spf131/qsdk/qca/src/linux-6.6/drivers/net/ethernet/rtl8366u/src/kaon/vlan.c
   profiles/GAPK-8100.profile
   target/linux/feeds/ipq53xx/config-6.6
+
+================================================================================
+13. eMMC 부팅 / U-Boot → Linux DTB 전달 (mmc@7804000)
+================================================================================
+
+작성·검증: 2026-06-09 (보드 runtime + 소스 분석)
+
+요약
+----
+  - GAPK-8100은 eMMC 부팅 (profiles/GAPK-8100.profile: STORAGE_TYPES=emmc)
+  - Linux DTS 소스 ipq5332-rdp442.dts 의 &sdhc { status = "disabled"; } 와
+    보드 sysfs mmc@7804000/status = okay 는 모순이 아님
+  - U-Boot bootm 직전 ft_board_setup() → ipq_fdt_fixup_flash() 가
+    eMMC 보드에서 mmc@7804000/status 를 "okay" 로 런타임 패치
+  - Linux cmdline root=PARTUUID=... gpt rootwait 는 set_mmc_bootargs() 가
+    eMMC GPT rootfs 파티션 UUID 로 생성
+
+13.1 용어
+---------
+  DTS   사람이 읽는 Device Tree 소스 (*.dts / *.dtsi)
+  DTB   DTS 를 dtc 로 컴파일한 바이너리
+  FDT   부팅 시 RAM 에 올라가 Linux 가 실제로 사용하는 DTB
+
+  같은 mmc@7804000 노드라도 "어디서 빌드했는지"에 따라 status 가 다름.
+
+13.2 DTB 세 군데 (GAPK-8100 / IPQ5332)
+---------------------------------------
+
+  [① U-Boot 자체 DTB]
+    파일: spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332.dtsi
+    노드: mmc: sdhci@7800000  (reg = 0x7804000)
+    status = "okay"
+    역할: U-Boot 가 eMMC 에서 0:HLOS / rootfs 등을 읽을 때 사용
+
+  [② Linux 커널 DTB — FIT 안에 포함]
+    파일: spf131/qsdk/qca/src/linux-6.6/arch/arm64/boot/dts/qcom/ipq5332-rdp442.dts
+    노드: &sdhc { mmc@7804000 ... status = "disabled"; }
+    ipq5332.dtsi / ipq5332_kaon.dtsi 기본값도 disabled
+    빌드된 kernel DTB decompile 시에도 status = "disabled"
+    역할: NAND/NOR/eMMC 공용 보드 DTS (중립 설정)
+
+  [③ Linux 가 실제로 받는 DTB — U-Boot 가 RAM 에서 수정]
+    FIT(0:HLOS) 에서 꺼낸 ② DTB 를 bootm → ft_board_setup() 이 패치
+    eMMC 부팅 보드: /soc@0/mmc@7804000/status → "okay"
+    보드 sysfs: /sys/firmware/devicetree/base/soc/mmc@7804000/status → okay
+
+13.3 eMMC 부팅 전체 흐름
+-----------------------
+
+  BootROM/PBL
+       ↓
+  U-Boot 실행 (① DTB, sdhc=okay → U-Boot MMC 드라이버로 eMMC 접근)
+       ↓
+  bootipq 명령
+       ↓
+  read_kernel() → boot_mmc()
+       → eMMC 파티션 "0:HLOS" 에서 FIT 읽기 (kernel + dtb + ...)
+       ↓
+  set_bootargs() → set_mmc_bootargs()
+       → root=PARTUUID=<rootfs UUID> gpt rootwait
+       (보드 확인 cmdline 과 일치)
+       ↓
+  boot_kernel() → bootm 0x...
+       → FIT unpack
+       → ft_board_setup() → ipq_fdt_fixup_flash()
+       → mmc@7804000 status = okay 패치
+       ↓
+  Linux 기동 (③ patched DTB + cmdline)
+       → sdhci-msm probe → mmcblk0
+       → PARTUUID 로 rootfs 마운트 → /rom (squashfs) + overlay
+
+13.4 핵심 U-Boot 코드
+---------------------
+
+  bootipq 상태 시퀀스 (cmd_bootipq.c):
+    read_kernel → (image_auth) → config_select → set_bootargs → boot_kernel
+
+  eMMC 커널 로드 (read_kernel / boot_mmc):
+    flash_type == SMEM_BOOT_MMC_FLASH
+    → eMMC "0:HLOS" (또는 active "0:HLOS_1") 파티션에서 FIT 읽기
+
+  bootargs 생성 (set_mmc_bootargs):
+    root=PARTUUID=%s gpt
+    env fsbootargs 에 설정 → 최종 bootargs 에 merge
+
+  DTB 패치 (board/qti/common/fdt_fixup.c — ipq_fdt_fixup_flash):
+    flash_type == SMEM_BOOT_MMC_FLASH 또는 SMEM_BOOT_NORPLUSEMMC 일 때:
+      parse_fdt_fixup(LINUX_6_x_MMC_DTS_NODE "%" STATUS_OK, blob);
+      parse_fdt_fixup(LINUX_6_x_NAND_DTS_NODE "%" STATUS_DISABLED, blob);
+
+  매크로 (board/qti/ipq5332/ipq5332.h):
+    LINUX_6_x_MMC_DTS_NODE  "/soc@0/mmc@7804000/"
+    STATUS_OK               "status%?okay"
+    STATUS_DISABLED         "status%?disabled"
+
+  ft_board_setup() (fdt_fixup.c):
+    fixup_functions[] 체인 마지막에 ipq_fdt_fixup_board 등 호출
+    bootm 직전 Linux 에 넘길 DTB blob 에 적용
+
+13.5 FIT / eMMC 파티션 구조
+---------------------------
+
+  eMMC (mmcblk0) — 빌드·플래시 기준
+    0:HLOS      FIT (qcom_mixx-fit-uImage.itb: kernel + fdt + ...)
+    rootfs      squashfs → Linux /rom
+    rootfs_1    A/B 백업 rootfs (active_part 에 따라)
+    0:WIFIFW    WiFi 펌웨어 → 보드에서 mmcblk0p19 → /lib/firmware/.../WIFI_FW
+    boot0/boot1 eMMC 하드웨어 boot 파티션
+    rpmb        eMMC RPMB
+
+  플래시 스크립트 (update_common / emmc-ipq5332-single.img):
+    xtract_n_flash ... 0:HLOS
+    xtract_n_flash ... rootfs
+
+13.6 보드 runtime 확인 (2026-06 실측)
+-------------------------------------
+
+  mmcblk0 + p1~p25, boot0, boot1, rpmb 존재
+
+  mount:
+    /dev/root on /rom type squashfs (ro)
+    /dev/loop0 on /overlay type ext4 (rw)
+    overlayfs:/overlay on / type overlay
+    /dev/mmcblk0p19 on /lib/firmware/IPQ5332/WIFI_FW type squashfs (ro)
+
+  cmdline:
+    root=PARTUUID=1f827cb8-ad48-935c-e3f3-c697a57ed7eb gpt rootwait ...
+
+  → eMMC GPT rootfs 부팅 + overlay + WiFi FW 파티션 마운트 정상
+
+13.7 Linux DTS 가 disabled 인 이유
+---------------------------------
+
+  Qualcomm 보드 DTS 는 플래시 종류(NAND / NOR / eMMC)별로 하나를 공유.
+
+  | 부팅 매체 | U-Boot ipq_fdt_fixup_flash 동작        |
+  |-----------|----------------------------------------|
+  | eMMC      | mmc@7804000 → okay, NAND → disabled  |
+  | NAND      | 반대로 패치                            |
+
+  Linux 소스에 미리 okay 로 고정하면 NAND 전용 이미지와 충돌.
+  따라서:
+    - 소스/커널 DTB: disabled (중립)
+    - U-Boot 런타임: 실제 boot flash type 에 맞게 okay 설정
+
+  ※ Linux DTS 를 disabled 로 두어도 eMMC 부팅·mmcblk0 동작에는 문제 없음
+    (U-Boot fixup 경로가 표준)
+
+13.8 sdhc 노드 상세 (Linux vs U-Boot)
+--------------------------------------
+
+  Linux (ipq5332.dtsi / rdp442.dts):
+    sdhc: mmc@7804000 {
+      compatible = "qcom,ipq5332-sdhci", "qcom,sdhci-msm-v5";
+      reg = <0x07804000 0x1000>, <0x07805000 0x1000>;
+      status = "disabled";   /* rdp442.dts &sdhc 도 disabled 유지 */
+      bus-width = <4>;
+      non-removable;
+      ...
+    };
+
+  U-Boot (ipq5332.dtsi):
+    mmc: sdhci@7800000 {
+      reg = <0x7804000 0x1000 0x7805000 0x1000>;
+      compatible = "qti,sdhci-msm-v5";
+      status = "okay";
+      non-removable;
+      ...
+    };
+
+  물리 주소 0x7804000 동일. U-Boot DTB decompile 시에도 status = okay.
+
+13.9 보드에서 추가 확인 명령
+----------------------------
+
+  [Linux]
+    ls /dev/mmcblk0*
+    cat /sys/firmware/devicetree/base/soc/mmc@7804000/status | tr '\0' '\n'
+    blkid | grep -i rootfs
+    cat /proc/cmdline
+    mount | grep -E 'mmc|/rom|overlay'
+    dmesg | grep -iE 'mmc|sdhci|emmc'
+
+  [U-Boot 프롬프트 — 재부팅 시 시리얼]
+    printenv bootcmd bootargs fdteditnum
+    bootipq 실행 로그: Reading 0:HLOS, bootm ...
+
+13.10 관련 파일 체크리스트 (13절)
+---------------------------------
+
+  [U-Boot]
+    spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332.dtsi
+    spf131/qsdk/qca/src/u-boot/arch/arm/dts/ipq5332-rdp442.dts
+    spf131/qsdk/qca/src/u-boot/board/qti/common/cmd_bootipq.c
+    spf131/qsdk/qca/src/u-boot/board/qti/common/fdt_fixup.c
+    spf131/qsdk/qca/src/u-boot/board/qti/ipq5332/ipq5332.h
+    spf131/qsdk/qca/src/u-boot/board/qti/ipq5332/ipq5332.c
+
+  [Linux DTS]
+    spf131/qsdk/qca/src/linux-6.6/arch/arm64/boot/dts/qcom/ipq5332-rdp442.dts
+    spf131/qsdk/qca/src/linux-6.6/arch/arm64/boot/dts/qcom/ipq5332_kaon.dtsi
+    spf131/qsdk/qca/src/linux-6.6/arch/arm64/boot/dts/qcom/ipq5332.dtsi
+
+  [프로필 / 파티션]
+    profiles/GAPK-8100.profile  (STORAGE_TYPES=emmc)
+    spf131/meta-tools-oss/ipq5332/flash_partition/emmc-partition.xml
+    spf131/common/build/bin/emmc-ipq5332-single.img
+
+  [커널 드라이버]
+    spf131/qsdk/qca/src/linux-6.6/drivers/mmc/host/sdhci-msm.c
+
+13.11 한 줄 정리
+----------------
+
+  U-Boot DT(okay) → eMMC 에서 FIT(0:HLOS) 읽기
+  FIT 내 Linux DTB(disabled) → 커널 이미지에 동봉
+  bootm + ft_board_setup → eMMC 보드면 mmc@7804000 을 okay 로 패치
+  Linux → 패치된 DTB + PARTUUID 로 eMMC rootfs(/rom+overlay) 부팅
+
+  Linux 소스 sdhc disabled ≠ eMMC 미지원
+  = 멀티 플래시 보드용 중립 DTS + U-Boot 런타임 선택
 
 ================================================================================
 문서 끝
