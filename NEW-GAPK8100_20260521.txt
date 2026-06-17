@@ -1149,5 +1149,356 @@ GAPK-8100 현재 설계:
   + nand-4k-partition.xml. gpio8~13 QSPI mux 동일. Linux qcom_nandc 4K 인식 확인.
 
 ================================================================================
+15. SPI NAND 드라이버 분석 요약 (Z: 소스 실측 기준)
+================================================================================
+
+  작성: 2026-06-16 (NEW-GAPK8100 Z: 소스 직접 분석)
+  대상 칩: Winbond W25N04LWZEIG (4Gb=512MB, 4K page, 1.8V, JEDEC ID: EF B2 23)
+
+15.1 전체 상태
+--------------
+
+  항목                              파일                              상태
+  -----------------------------------------------------------------------
+  STORAGE_TYPES="nand-4k"          profiles/GAPK-8100.profile        완료
+  U-Boot nand32 패키지             profiles/GAPK-8100.qsdk.config    완료
+  Linux qpic_nand = okay           ipq5332-rdp442.dts                완료
+  Linux sdhc = disabled            ipq5332-rdp442.dts                완료
+  qcom_nandc.c W25N04LW 4K 등록   linux-6.6/drivers/mtd/nand/raw/   완료
+  qti_nand.c   W25N04LW 4K 등록   u-boot/drivers/mtd/nand/raw/      완료
+  nand-4k-partition.xml            meta-tools-oss/ipq5332/           존재
+  platform.sh eMMC/NAND 자동분기  feeds/ipq53xx/base-files/upgrade/ 수정불필요
+  board.d 스크립트                 staging_dir/.../etc/board.d/      수정불필요
+
+15.2 드라이버 상세
+------------------
+
+  [U-Boot] qti_nand.c — qti_nand_flash_ids[] 및 qpic_nand_flash_ids_2k[] 등록
+    {"W25N04LW",
+        { .id = {0xef, 0xb2, 0x23} },
+        SZ_4K, SZ_512, SZ_256K, QUAD_MODE, 3, 256,
+        NAND_ECC_INFO(8, SZ_512), 0},
+
+  [Linux] qcom_nandc.c — qspinand_flash_ids_2k[] 등록
+    {"W25N04LW SPI NAND 4G 1.8V",
+        { .id = {0xef, 0xb2, 0x23} },
+        SZ_4K, SZ_512, SZ_256K, 0, 2, 256, NAND_ECC_INFO(8, SZ_512)},
+
+  [U-Boot] winbond.c — W25N04LW 미등록 (W25M02GV, W25N01GV 2종만)
+    → GAPK-8100은 qti_nand.c (QPIC Raw NAND) 경로 사용으로 영향 없음
+
+15.3 Linux DTS 설정 (ipq5332-rdp442.dts)
+-----------------------------------------
+
+  &sdhc    { status = "disabled"; }   /* eMMC OFF */
+
+  &qpic_nand {
+      pinctrl-0 = <&qspi_default_state>;
+      status = "okay";
+      nandcs@0 {
+          nand-ecc-strength   = <8>;
+          nand-ecc-step-size  = <512>;
+          nand-bus-width      = <8>;
+      };
+  };
+
+  GPIO 핀맵 (qspi_default_state):
+    gpio13 = qspi_clk   gpio12 = qspi_cs
+    gpio8~11 = qspi_data[0:3]
+
+15.4 파티션 구조 (nand-4k-partition.xml)
+-----------------------------------------
+
+  0:SBL1      768KB   xbl_nand.elf
+  0:MIBIB     512KB   nand-system-partition-ipq5332-m4096-p256KiB.bin
+  0:BOOTCONFIG 256KB  bootconfig.bin (×2 A/B)
+  0:QSEE      1792KB  tz.mbn (×2 A/B)
+  0:CDT       256KB   cdt.bin (×2 A/B)
+  0:APPSBL    768KB   uboot-nand32-u-boot_compressed.mbn (×2 A/B)
+  0:ART       1024KB  WiFi cal
+  rootfs      86528KB openwrt-ipq53xx-ubi-root-m4096-p256KiB.img (×2 A/B)
+
+  ※ eMMC 대비 kaondata(51200KB), 0:WIFIFW 파티션 없음
+
+15.5 UBI 볼륨 구성 (ipq5332-ubinize-256.cfg)
+---------------------------------------------
+
+  [wifi_fw]    wifi_fw_ipq5332_qcn6432_squashfs.img  vol_id=0
+  [kernel]     fit-uImage.itb                         vol_id=1
+  [rootfs]     squashfs-root.img (dynamic)            vol_id=2
+  [rootfs_data] autoresize (overlay)                  vol_id=3
+
+  ※ kaondata UBI 볼륨 없음
+
+15.6 커널 config 현황 (config-6.6)
+------------------------------------
+
+  CONFIG_MTD_NAND_QCOM=y       QPIC NAND 드라이버 활성
+  CONFIG_MTD_RAW_NAND=y
+  CONFIG_MTD_UBI=y
+  CONFIG_UBIFS_FS=y
+  CONFIG_MMC=y                 eMMC 드라이버 활성 (sdhc disabled 이나 코드 포함)
+  CONFIG_MMC_SDHCI_MSM=y
+  CONFIG_MTD_SPINAND_WINBOND=  미설정 (부팅 경로 무관)
+
+15.7 수정/결정 필요 항목
+-------------------------
+
+  [필수]
+  ① nand-4k-partition.xml
+     → kaondata 파티션 추가 여부 결정 (eMMC: 51200KB)
+       또는 rootfs_data autoresize 통합
+
+  ② ipq5332-ubinize-256.cfg (또는 KAON 전용 신규 cfg)
+     → kaondata UBI 볼륨 추가 여부 결정
+     → cal_fw 볼륨 필요 여부 확인 (ipq5332-ubinize-256M.cfg 참고)
+
+  ③ CDT 재생성
+     → spf131/common/build/ipq/scripts/gen_flash_partition_bin.py
+        실행 시 --memory 512 지정 필수
+
+  [선택]
+  ④ config-6.6
+     → CONFIG_MMC_SDHCI_MSM=n  (불필요한 eMMC 드라이버 제거, 용량 절감)
+
+15.8 부팅 후 검증 명령
+-----------------------
+
+  dmesg | grep -iE 'nand|W25N04|writesize|QPIC'
+  → writesize=4096 확인 (2048이면 qcom_nandc.c 4K ID 테이블 패치 필요)
+
+  cat /proc/mtd
+  → rootfs MTD 파티션 존재 확인
+
+  ubinfo -a
+  → UBI 볼륨 마운트 상태 확인
+
+15.9 핵심 파일 체크리스트
+--------------------------
+
+  [드라이버]
+    spf131/qsdk/qca/src/linux-6.6/drivers/mtd/nand/raw/qcom_nandc.c
+    spf131/qsdk/qca/src/u-boot/drivers/mtd/nand/raw/qti_nand.c
+
+  [DTS]
+    spf131/qsdk/target/linux/feeds/files-6.6/arch/arm64/boot/dts/qcom/ipq5332-rdp442.dts
+
+  [빌드/프로필]
+    profiles/GAPK-8100.profile
+    profiles/GAPK-8100.qsdk.config
+    spf131/qsdk/target/linux/feeds/ipq53xx/config-6.6
+
+  [파티션/UBI]
+    spf131/meta-tools-oss/ipq5332/flash_partition/nand-4k-partition.xml
+    spf131/meta-tools-oss/ipq5332/flash_partition/ipq5332-ubinize-256.cfg
+    spf131/common/build/ipq/scripts/gen_flash_partition_bin.py
+
+================================================================================
+16. 파티션 구조 요약 — MTD + UBI (W25N04LWZEIG 교체 후)
+================================================================================
+
+  작성: 2026-06-17 (NEW-GAPK8100 eMMC → SPI NAND 교체 작업 중)
+
+  수정된 파일
+  -----------
+    spf131/meta-tools-oss/ipq5332/flash_partition/nand-4k-partition.xml
+    spf131/meta-tools-oss/ipq5332/flash_partition/ipq5332-ubinize-256.cfg
+
+16.1 계층 관계
+--------------
+
+  NAND 512MB (W25N04LWZEIG)
+   ├── 시스템 파티션 (SBL1, QSEE, APPSBL 등)  ~12MB
+   ├── rootfs MTD [134.5MB]  ← UBI 컨테이너  ★ 수정됨
+   │    ├── UBI vol_0: wifi_fw   (10.5MB, static)
+   │    ├── UBI vol_1: kernel    (6MB, static)
+   │    ├── UBI vol_2: ubi_rootfs (dynamic)
+   │    ├── UBI vol_3: kaondata  (50MB, dynamic)  ← 신규 추가
+   │    └── UBI vol_4: rootfs_data (1KB → autoresize = 나머지 전부)
+   └── rootfs_1 MTD [134.5MB]  ← A/B 업데이트용 백업  ★ 수정됨
+
+16.2 MTD 레이어 — nand-4k-partition.xml
+----------------------------------------
+
+  파티션            크기          용도
+  ---------------------------------------------------------------
+  0:SBL1 / _1      768KB × 2    1차 부트로더 (A/B)
+  0:MIBIB           512KB        파티션 테이블
+  0:BOOTCONFIG / _1 256KB × 2   부트 설정 (A/B)
+  0:QSEE / _1     1792KB × 2    TrustZone (A/B)
+  0:DEVCFG / _1    256KB × 2    장치 설정 (A/B)
+  0:TME / _1       256KB × 2    TME 펌웨어 (A/B)
+  0:CDT / _1       256KB × 2    CDT 바이너리 (A/B)
+  0:APPSBLENV      256KB         U-Boot 환경변수
+  0:APPSBL / _1    768KB × 2    U-Boot (A/B)
+  0:ETHPHYFW       512KB         Ethernet PHY FW
+  0:TRAINING       256KB         NAND 트레이닝 데이터
+  0:ART           1024KB         WiFi 캘리브레이션
+  0:LICENSE        256KB         라이선스
+  rootfs         137728KB        UBI 컨테이너  ← 86528KB → 137728KB (+50MB)
+  rootfs_1       137728KB        UBI 컨테이너 백업  ← 동일 변경
+
+  변경 이유: kaondata UBI 볼륨 50MB 수용
+
+16.3 UBI 레이어 — ipq5332-ubinize-256.cfg
+------------------------------------------
+
+  MTD rootfs 파티션 안에 UBI 볼륨들이 담김.
+
+  vol_id  볼륨명          크기        타입              내용
+  -----------------------------------------------------------------------
+  0       wifi_fw        10752KB     static            Wi-Fi 펌웨어
+  1       kernel          6MiB       static            커널 이미지 (FIT)
+  2       ubi_rootfs      dynamic    dynamic            루트파일시스템 squashfs
+  3       kaondata        50MiB      dynamic            Kaon 전용 데이터  ← 신규
+  4       rootfs_data     1KB→자동   dynamic+autoresize OpenWrt overlay (설정/로그)
+
+  ※ rootfs_data: autoresize 플래그 → UBI 할당 후 남은 공간 전부 자동 차지
+  ※ kaondata 추가로 기존 rootfs_data vol_id=3 → vol_id=4 로 변경됨
+
+16.4 변경 전후 비교
+--------------------
+
+  항목                  변경 전       변경 후       비고
+  ---------------------------------------------------------------
+  rootfs MTD 크기        86528KB      137728KB      +50MB
+  rootfs_1 MTD 크기      86528KB      137728KB      +50MB
+  UBI vol 수             4개           5개           kaondata 추가
+  kaondata vol_id        없음         vol_id=3      신규
+  rootfs_data vol_id     3             4             kaondata 에 밀림
+
+16.5 관련 파일
+--------------
+
+  spf131/meta-tools-oss/ipq5332/flash_partition/nand-4k-partition.xml
+  spf131/meta-tools-oss/ipq5332/flash_partition/ipq5332-ubinize-256.cfg
+
+
+16.6
+-------------
+UBI 볼륨 방식 설명
+eMMC vs NAND 저장 구조 차이
+┌─────────────────────────────────────────────────────────┐
+│  eMMC (현재)                                             │
+│                                                         │
+│  GPT 파티션 테이블                                       │
+│  ┌──────────┬──────────┬──────────┬──────────────────┐  │
+│  │ rootfs   │ rootfs_1 │ kaondata │ extarea ...      │  │
+│  │ 122MB    │ 122MB    │  50MB    │ 2.7GB ...        │  │
+│  └──────────┴──────────┴──────────┴──────────────────┘  │
+│                                                         │
+│  → 각 파티션 = 독립 블록 디바이스 (ext4 등으로 포맷)     │
+│  → kaondata = /dev/mmcblk0pXX                          │
+└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  SPI NAND (변경 후)                                      │
+│                                                         │
+│  MTD 파티션 테이블 (nand-4k-partition.xml)               │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │  MTD0: 0:SBL1 │ MTD1: 0:MIBIB │ ...            │   │
+│  │  MTD N: rootfs  (86MB)                          │   │
+│  │  ┌────────────────────────────────────────────┐ │   │
+│  │  │  UBI 레이어 (wear leveling, bad block 관리)│ │   │
+│  │  │  ┌──────────┬─────────┬──────┬──────────┐  │ │   │
+│  │  │  │ wifi_fw  │ kernel  │rootfs│rootfs_data│  │ │   │
+│  │  │  │  10MB    │   6MB   │동적  │autoresize │  │ │   │
+│  │  │  └──────────┴─────────┴──────┴──────────┘  │ │   │
+│  │  │           UBI 볼륨들                        │ │   │
+│  │  └────────────────────────────────────────────┘ │   │
+│  └──────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+NAND에서 UBI가 필요한 이유
+NAND 플래시의 특성:
+
+1. 셀 수명 제한   - 한 블록을 계속 쓰면 수명이 줄어듦
+2. Bad Block     - 제조 시부터 또는 사용 중 불량 블록 발생
+3. 직접 파일시스템 불가 - ext4, fat 등을 NAND에 바로 쓰면 수명 급감
+UBI(Unsorted Block Images)가 하는 일:
+
+┌──────────────────────────────────────────────────────┐
+│  애플리케이션                                         │
+│       ↕                                              │
+│  UBIFS (파일시스템)                                   │
+│       ↕                                              │
+│  UBI 레이어                                           │
+│    - Wear Leveling : 블록을 골고루 사용               │
+│    - Bad Block 관리: 불량 블록 자동 회피              │
+│    - ECC 지원     : 데이터 무결성 보장               │
+│       ↕                                              │
+│  MTD (Raw NAND)                                      │
+└──────────────────────────────────────────────────────┘
+kaondata 추가 시 두 가지 방법 비교
+방법 A: MTD 파티션 (nand-4k-partition.xml에 추가)
+
+<partition>
+    <name>kaondata</name>
+    <size_kb>51200</size_kb>   ← 50MB 고정
+</partition>
+장점: 구조가 단순, eMMC 방식과 유사
+단점: Wear leveling 없음 → 자주 쓰는 데이터면 수명 단축
+      Bad block 발생 시 해당 파티션 전체 손상 위험
+방법 B: UBI 볼륨 (ipq5332-ubinize-256.cfg에 추가)
+
+[kaondata]
+mode=ubi
+vol_size=50MiB
+vol_type=dynamic
+vol_id=4
+vol_name=kaondata
+
+[rootfs_data]          ← 기존 overlay, vol_id 5로 변경
+mode=ubi
+vol_size=1KiB
+vol_id=5
+vol_flags=autoresize
+장점: Wear leveling 자동 적용
+      Bad block 자동 회피
+      NAND에 최적화된 방식
+단점: rootfs MTD 파티션 안에 들어가므로
+      rootfs_data(overlay) 공간이 50MB 줄어듦
+권장 방법
+kaondata 용도              권장 방식
+─────────────────────────────────────────────────
+설정/로그 등 자주 쓰기   → UBI 볼륨 (방법 B)
+거의 안 쓰는 데이터      → MTD 파티션 (방법 A)
+kaondata가 설정값, 로그 등을 저장한다면 UBI 볼륨이 맞습니다
+
+-------------------------------------------------
+두 파일의 역할(xml,cfg)
+
+eMMC의 경우 — XML 하나만 필요
+emmc-partition.xml
+       ↓
+  플래시 툴이 GPT 파티션 생성
+  ┌────────┬────────┬────────┬──────────┬─────────┐
+  │ 0:HLOS │0:WIFIFW│ rootfs │ kaondata │ extarea │
+  │  7MB   │  12MB  │ 122MB  │   50MB   │  2.7GB  │
+  └────────┴────────┴────────┴──────────┴─────────┘
+  각각 독립 파티션 → 이미지 직접 기록
+  ubinize cfg 불필요 (UBI 안 씀)
+
+NAND의 경우 — 두 파일 모두 필요, 역할이 다름
+nand-4k-partition.xml               ipq5332-ubinize-256.cfg
+       ↓                                      ↓
+  NAND를 MTD로 분할                  rootfs MTD 안의 UBI 이미지 구성
+  ┌─────────┬─────────────────────┐
+  │ 0:SBL1  │ ... │ 0:ART │rootfs│
+  │  768KB  │     │  1MB  │ 86MB │
+  └─────────┴─────────────┴──┬───┘
+                              │  ← 이 안에 ubinize.cfg로 만든 UBI 이미지 기록
+                              ↓
+                    ┌─────────────────────┐
+                    │ UBI 이미지          │
+                    │ ┌────────┬────────┐ │
+                    │ │wifi_fw │ kernel │ │
+                    │ ├────────┴────────┤ │
+                    │ │    ubi_rootfs   │ │
+                    │ ├─────────────────┤ │
+                    │ │   rootfs_data   │ │
+                    │ └─────────────────┘ │
+                    └─────────────────────┘
+
+
+================================================================================
 문서 끝
 ================================================================================
