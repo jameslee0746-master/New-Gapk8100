@@ -1502,3 +1502,158 @@ nand-4k-partition.xml               ipq5332-ubinize-256.cfg
 ================================================================================
 문서 끝
 ================================================================================
+
+
+
+================================================================================
+CDT .bin 파일의 DDR 초기화 동작 전체 흐름
+================================================================================
+
+■ 1단계: XML 템플릿 → Binary 변환 (빌드 타임)
+--------------------------------------------------------------------------------
+cdt/1024M16_DDR4.xml
+        |
+        |  gen_cdt_bin.py
+        |  - config.xml 의 <memory>1024M16_DDR4</memory> 읽음
+        |  - AP-MI01.3 machid(0x8060002) 를 platform_id 에 삽입
+        v
+    machid_xml/AP-MI01.3_1024M16_DDR4.xml  (수정된 중간 XML)
+        |
+        |  cdt_generator.py
+        |  - XML 파싱 → uint32 little-endian 직렬화
+        |  - CRC32 계산 후 header 에 삽입
+        v
+    cdt-AP-MI01.3_1024M16_DDR4.bin
+        |
+        |  pack.py
+        |  - filename = cdt- + board + _ + memory + .bin
+        |  - 이미지에 패키징
+        v
+    single-image.bin  (NAND flash 기록용 최종 이미지)
+
+
+■ 2단계: CDT binary 내부 구조
+--------------------------------------------------------------------------------
+[ cdt_header ]  14 bytes
+  magic    : 43 44 54 00  (CDT0)
+  version  : 02 00
+  CRC32    : XX XX XX XX  (metadata+blockdata 전체 CRC)
+  reserved : 00 00 00 00
+
+[ metadata ]  12 bytes  (CDB 개수 x 4 bytes)
+  CDB0 offset(16bit) + CDB0 size(16bit)
+  CDB1 offset(16bit) + CDB1 size(16bit)
+  CDB2 offset(16bit) + CDB2 size(16bit)
+
+[ CDB0 ]  platform_id  5 bytes
+  0x02, 0x08, 0x60, 0x00, 0x02  ← machid=0x8060002 (AP-MI01.3)
+
+[ CDB1 ]  DDR 물리 파라미터  ~252 bytes
+  device_size_cs0    = 2048       ← 1GB 크기 인코딩
+  num_rows_cs0       = 17         ← row address bits
+  num_banks_cs0      = 8          ← bank 수
+  device_io_width_cs = 16         ← 16-bit bus width
+  tRFC               = 350000 ps  ← refresh timing
+  tRAS_Min           = 32000 ps   ← row active time
+  tREFI              = 7800000 ps ← refresh interval
+  mr0 ~ mr6                       ← DDR4 Mode Register 값
+  wrlat_adj_f0       = 12         ← write latency
+  rdlat_adj_f0       = 17         ← read latency
+  drive_strength, odt             ← 전기적 특성 (PHY)
+
+[ CDB2 ]  boot_settings  ~8 bytes
+  boot_settings = 3918
+    BIT 14:13 = 00  → DDR 주파수 1200MHz
+    BIT 11    = 1   → RESET_TYPE Warm
+    BIT 10:9  = 11  → CPR_APC Closed Loop
+    BIT  8:7  = 10  → CPR_NSS Open Loop
+
+
+■ 3단계: Flash 파티션 배치
+--------------------------------------------------------------------------------
+nand-4k-partition.xml:
+  0:CDT    (256KB)  ← cdt.bin 저장 (메인)
+  0:CDT_1  (256KB)  ← cdt.bin backup
+
+NAND flash 물리 레이아웃 (앞부분):
+  Block 0   : SBL1 (Secondary Boot Loader)
+  ...
+  Block N   : 0:CDT   ← cdt.bin 기록
+  Block N+1 : 0:CDT_1 ← backup
+
+
+■ 4단계: 부트 타임 동작 (XBL/SBL)
+--------------------------------------------------------------------------------
+CPU 리셋
+    |
+    v
+IPQ5332 내부 ROM (PBL, Primary Boot Loader)
+  - NAND 에서 XBL 로드 → CPU cache/IMEM 에서 실행
+    |
+    v
+XBL (eXtensible Boot Loader)  ← DDR 없는 상태에서 실행
+  - NAND 에서 0:CDT 파티션 읽기
+    |
+    v
+CDB0 파싱: platform_id 확인
+  - machid 0x8060002 == AP-MI01.3 보드인지 검증
+    |
+    v
+CDB2 파싱: boot_settings
+  - DDR 주파수 결정 (1200MHz)
+  - RESET_TYPE 결정 (Warm)
+    |
+    v
+CDB1 파싱: DDR 물리 파라미터 → DDR 컨트롤러 레지스터 프로그래밍
+  - device_size_cs0=2048 → DDR 크기 설정 (1GB)
+  - num_rows/cols/banks  → 어드레스 맵핑
+  - tRFC, tRAS, tREFI   → 타이밍 레지스터 설정
+  - mr0 ~ mr6           → DDR4 칩에 Mode Register Write 명령
+  - drive_strength, odt → PHY 드라이버/종단 설정
+    |
+    v
+DDR 초기화 완료 → 1GB DRAM 접근 가능
+    |
+    v
+XBL 이 NAND 에서 나머지 부트 이미지 (APPSBL/U-Boot) 를 DDR 로 로드
+    |
+    v
+Linux 부팅
+
+
+================================================================================
+핵심 포인트 요약
+================================================================================
+
+[변경 내용]
+파일 : spf131/meta-tools-oss/ipq5332/config.xml  Line 435
+  변경전: <memory>512M16_DDR4</memory>
+  변경후: <memory>1024M16_DDR4</memory>
+
+[DDR 파라미터 비교]
+항목                   512M16_DDR4 (변경전)   1024M16_DDR4 (변경후)
+----------------------------------------------------------------------
+device_size_cs0        512                    2048
+num_banks_cs0          4                      8
+XBL 인식 메모리        512MB                  1GB
+K4A8G165WG-BCWE 호환   X (절반만 인식)        O (1GB 전체)
+
+[DDR 파츠 변경 이력]
+구 파츠: H5ANAG6NCJR-XNC  (SK Hynix, 16Gbit=2GB, x16)
+         → 12.04 build: config.xml 에 512M16_DDR4 로 잘못 설정
+           (실제 2GB 칩이지만 512MB 만 인식되는 문제 있었음)
+
+신 파츠: K4A8G165WG-BCWE  (Samsung, 8Gbit=1GB, x16)
+         → 13.1 build: config.xml 435라인 1024M16_DDR4 로 수정
+           CDT 템플릿  : cdt/1024M16_DDR4.xml 사용
+           생성 바이너리: cdt-AP-MI01.3_1024M16_DDR4.bin
+
+[빌드 흐름 요약]
+config.xml <memory>1024M16_DDR4</memory>
+    → gen_cdt_bin.py : cdt/1024M16_DDR4.xml 선택
+    → cdt_generator.py: binary 변환 + CRC
+    → cdt-AP-MI01.3_1024M16_DDR4.bin 생성
+    → pack.py: 이미지 패키징
+    → XBL 부트시 CDT 읽어 DDR 초기화
+
+================================================================================
