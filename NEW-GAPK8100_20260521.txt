@@ -1500,10 +1500,6 @@ nand-4k-partition.xml               ipq5332-ubinize-256.cfg
 
 
 ================================================================================
-문서 끝
-================================================================================
-
-
 
 ================================================================================
 CDT .bin 파일의 DDR 초기화 동작 전체 흐름
@@ -1526,7 +1522,7 @@ cdt/1024M16_DDR4.xml
     cdt-AP-MI01.3_1024M16_DDR4.bin
         |
         |  pack.py
-        |  - filename = cdt- + board + _ + memory + .bin
+        |  - filename = "cdt-" + board + "_" + memory + ".bin"
         |  - 이미지에 패키징
         v
     single-image.bin  (NAND flash 기록용 최종 이미지)
@@ -1535,7 +1531,7 @@ cdt/1024M16_DDR4.xml
 ■ 2단계: CDT binary 내부 구조
 --------------------------------------------------------------------------------
 [ cdt_header ]  14 bytes
-  magic    : 43 44 54 00  (CDT0)
+  magic    : 43 44 54 00  ("CDT\0")
   version  : 02 00
   CRC32    : XX XX XX XX  (metadata+blockdata 전체 CRC)
   reserved : 00 00 00 00
@@ -1546,40 +1542,40 @@ cdt/1024M16_DDR4.xml
   CDB2 offset(16bit) + CDB2 size(16bit)
 
 [ CDB0 ]  platform_id  5 bytes
-  0x02, 0x08, 0x60, 0x00, 0x02  ← machid=0x8060002 (AP-MI01.3)
+  0x02, 0x08, 0x60, 0x00, 0x02  <- machid=0x8060002 (AP-MI01.3)
 
 [ CDB1 ]  DDR 물리 파라미터  ~252 bytes
-  device_size_cs0    = 2048       ← 1GB 크기 인코딩
-  num_rows_cs0       = 17         ← row address bits
-  num_banks_cs0      = 8          ← bank 수
-  device_io_width_cs = 16         ← 16-bit bus width
-  tRFC               = 350000 ps  ← refresh timing
-  tRAS_Min           = 32000 ps   ← row active time
-  tREFI              = 7800000 ps ← refresh interval
-  mr0 ~ mr6                       ← DDR4 Mode Register 값
-  wrlat_adj_f0       = 12         ← write latency
-  rdlat_adj_f0       = 17         ← read latency
-  drive_strength, odt             ← 전기적 특성 (PHY)
+  device_size_cs0    = 2048       <- 1GB 크기 인코딩
+  num_rows_cs0       = 17         <- row address bits
+  num_banks_cs0      = 8          <- bank 수
+  device_io_width_cs = 16         <- 16-bit bus width
+  tRFC               = 350000 ps  <- refresh timing
+  tRAS_Min           = 32000 ps   <- row active time
+  tREFI              = 7800000 ps <- refresh interval
+  mr0 ~ mr6                       <- DDR4 Mode Register 값
+  wrlat_adj_f0       = 12         <- write latency
+  rdlat_adj_f0       = 17         <- read latency
+  drive_strength, odt             <- 전기적 특성 (PHY)
 
 [ CDB2 ]  boot_settings  ~8 bytes
   boot_settings = 3918
-    BIT 14:13 = 00  → DDR 주파수 1200MHz
-    BIT 11    = 1   → RESET_TYPE Warm
-    BIT 10:9  = 11  → CPR_APC Closed Loop
-    BIT  8:7  = 10  → CPR_NSS Open Loop
+    BIT 14:13 = 00  -> DDR 주파수 1200MHz
+    BIT 11    = 1   -> RESET_TYPE Warm
+    BIT 10:9  = 11  -> CPR_APC Closed Loop
+    BIT  8:7  = 10  -> CPR_NSS Open Loop
 
 
 ■ 3단계: Flash 파티션 배치
 --------------------------------------------------------------------------------
 nand-4k-partition.xml:
-  0:CDT    (256KB)  ← cdt.bin 저장 (메인)
-  0:CDT_1  (256KB)  ← cdt.bin backup
+  0:CDT    (256KB)  <- cdt.bin 저장 (메인)
+  0:CDT_1  (256KB)  <- cdt.bin backup
 
 NAND flash 물리 레이아웃 (앞부분):
   Block 0   : SBL1 (Secondary Boot Loader)
   ...
-  Block N   : 0:CDT   ← cdt.bin 기록
-  Block N+1 : 0:CDT_1 ← backup
+  Block N   : 0:CDT   <- cdt.bin 기록
+  Block N+1 : 0:CDT_1 <- backup
 
 
 ■ 4단계: 부트 타임 동작 (XBL/SBL)
@@ -1588,10 +1584,10 @@ CPU 리셋
     |
     v
 IPQ5332 내부 ROM (PBL, Primary Boot Loader)
-  - NAND 에서 XBL 로드 → CPU cache/IMEM 에서 실행
+  - NAND 에서 XBL 로드 -> CPU cache/IMEM 에서 실행
     |
     v
-XBL (eXtensible Boot Loader)  ← DDR 없는 상태에서 실행
+XBL (eXtensible Boot Loader)  <- DDR 없는 상태에서 실행
   - NAND 에서 0:CDT 파티션 읽기
     |
     v
@@ -1604,15 +1600,15 @@ CDB2 파싱: boot_settings
   - RESET_TYPE 결정 (Warm)
     |
     v
-CDB1 파싱: DDR 물리 파라미터 → DDR 컨트롤러 레지스터 프로그래밍
-  - device_size_cs0=2048 → DDR 크기 설정 (1GB)
-  - num_rows/cols/banks  → 어드레스 맵핑
-  - tRFC, tRAS, tREFI   → 타이밍 레지스터 설정
-  - mr0 ~ mr6           → DDR4 칩에 Mode Register Write 명령
-  - drive_strength, odt → PHY 드라이버/종단 설정
+CDB1 파싱: DDR 물리 파라미터 -> DDR 컨트롤러 레지스터 프로그래밍
+  - device_size_cs0=2048 -> DDR 크기 설정 (1GB)
+  - num_rows/cols/banks  -> 어드레스 맵핑
+  - tRFC, tRAS, tREFI   -> 타이밍 레지스터 설정
+  - mr0 ~ mr6           -> DDR4 칩에 Mode Register Write 명령
+  - drive_strength, odt -> PHY 드라이버/종단 설정
     |
     v
-DDR 초기화 완료 → 1GB DRAM 접근 가능
+DDR 초기화 완료 -> 1GB DRAM 접근 가능
     |
     v
 XBL 이 NAND 에서 나머지 부트 이미지 (APPSBL/U-Boot) 를 DDR 로 로드
@@ -1640,20 +1636,61 @@ K4A8G165WG-BCWE 호환   X (절반만 인식)        O (1GB 전체)
 
 [DDR 파츠 변경 이력]
 구 파츠: H5ANAG6NCJR-XNC  (SK Hynix, 16Gbit=2GB, x16)
-         → 12.04 build: config.xml 에 512M16_DDR4 로 잘못 설정
+         -> 12.04 build: config.xml 에 512M16_DDR4 로 잘못 설정
            (실제 2GB 칩이지만 512MB 만 인식되는 문제 있었음)
 
 신 파츠: K4A8G165WG-BCWE  (Samsung, 8Gbit=1GB, x16)
-         → 13.1 build: config.xml 435라인 1024M16_DDR4 로 수정
+         -> 13.1 build: config.xml 435라인 1024M16_DDR4 로 수정
            CDT 템플릿  : cdt/1024M16_DDR4.xml 사용
            생성 바이너리: cdt-AP-MI01.3_1024M16_DDR4.bin
 
 [빌드 흐름 요약]
 config.xml <memory>1024M16_DDR4</memory>
-    → gen_cdt_bin.py : cdt/1024M16_DDR4.xml 선택
-    → cdt_generator.py: binary 변환 + CRC
-    → cdt-AP-MI01.3_1024M16_DDR4.bin 생성
-    → pack.py: 이미지 패키징
-    → XBL 부트시 CDT 읽어 DDR 초기화
+    -> gen_cdt_bin.py : cdt/1024M16_DDR4.xml 선택
+    -> cdt_generator.py: binary 변환 + CRC
+    -> cdt-AP-MI01.3_1024M16_DDR4.bin 생성
+    -> pack.py: 이미지 패키징
+    -> XBL 부트시 CDT 읽어 DDR 초기화
 
 ================================================================================
+파일								변경 내용
+drivers/net/Kconfig					source "drivers/net/rtl8366u/Kconfig" 추가
+drivers/net/Makefile					obj-$(CONFIG_RTL_RTL8366U) += rtl8366u/ 추가
+configs/ipq5332_tiny_v2_nand32_defconfig		CONFIG_RTL_RTL8366U=y 추가
+dts/upstream/include/dt-bindings/net/qcom_ipqsoc.h	RTL8373_SWITCH_TYPE = 13 추가
+drivers/net/qcom/ipq5332_port_config.c			RTL8373 port_config 항목 추가 (10G USXGMII)
+drivers/net/qcom/nss-switch.c				extern 선언 + probe 초기화 블록 + start force-link + printf 스킵
+
+12.04 vs 13.1 ethernet 드라이버 파일 비교
+12.04 — 3개 분리 파일 (drivers/net/ipq5332/)
+파일		라인		역할
+ipq5332_edma.c	1,733		EDMA 링 관리, TX/RX, eth_device 콜백
+ipq5332_ppe.c	885		PPE/ACL/MAC 포트 설정, 속도 설정
+ipq5332_uniphy.c 525		UniPhy SerDes 모드 설정
+합계	3,143	
+
+13.1 — 1개 통합 파일 (drivers/net/qcom/)
+파일			라인		역할
+nss-switch.c		3,387	EDMA + PPE + UniPhy + DM eth driver 전부 통합
+ipq5332_port_config.c	~230	PHY 타입별 클럭/MAC/SerDes 설정 테이블
+nss-switch.h		~1,100	공통 헤더
+
+핵심 구조 변화
+12.04                               13.1
+─────────────────────────────────   ──────────────────────────────────
+board_eth_init()                    DM probe: ipq_eth_probe()
+  └─ ipq5332_edma_init(NULL)          └─ ipq_edma_hw_init()   ← edma
+       ├─ ipq5332_ppe.c               └─ ppe_uniphy_mode_set() ← uniphy
+       └─ ipq5332_uniphy.c            └─ ppe_port_mux_set()   ← ppe
+함수명 변화:
+  ppe_uniphy_mode_set(uniphy_index, mode)  →  ppe_uniphy_mode_set(port)
+  ipq5332_edma_init(NULL)                  →  ipq_edma_hw_init(dev, priv)
+  ipq5332_eth_init()                       →  ipq_eth_start()
+  ipq5332_eth_halt()                       →  ipq_eth_stop()
+eth_device (레거시)                        udevice DM (Driver Model)
+
+결론: 13.1에서 ipq5332_edma.c + ipq5332_ppe.c + ipq5332_uniphy.c 세 파일이 nss-switch.c 하나로 합쳐진 것입니다.
+함수 이름 앞에 ipq5332_ 대신 ipq_로 통일되고 DM 프레임워크로 전환됐습니다.
+
+================================================================================
+
