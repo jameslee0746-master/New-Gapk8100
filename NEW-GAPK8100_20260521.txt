@@ -1694,3 +1694,40 @@ eth_device (레거시)                        udevice DM (Driver Model)
 
 ================================================================================
 
+
+================================================================================
+## U-Boot DTS Change (ipq5332-u-boot.dtsi)
+## File: arch/arm/dts/ipq5332-u-boot.dtsi
+## Add RTL8373 switch port node for u-boot-2025 porting
+================================================================================
+
+### 1. Add rtl8373 phy node inside mdio node (line 65)
+
+		mdio: mdio@90000 {
+			...
+			status = "okay";
+
+			rtl8373: ethernet-phy@0 {       /* ADD */
+				uniphy_id = <0>;              /* SerDes0 (SERDES_ID0) */
+				phy_addr = <0xFF>;            /* No MDIO - handled by RTL SDK internally */
+				phy_type = <13>;              /* RTL8373_SWITCH_TYPE */
+				id = <1>;                     /* PPE port 1 */
+				xgmac;                        /* 10G XGMAC mode */
+			};
+		};
+
+### 2. Add phy-handle0 reference in ethernet: nss-switch node (line 200)
+
+		ethernet: nss-switch {
+			...
+			bridge_mode;
+			status = "okay";
+			phy-handle0 = <&rtl8373>;       /* ADD */
+		};
+
+### Value description
+- uniphy_id = <0>  : Confirmed SERDES_ID0 usage in 12.04 kaon/init.c
+- phy_addr = <0xFF>: nss-switch.c skips MDIO bus setup when phyaddr == 0xFF
+- phy_type = <13>  : RTL8373_SWITCH_TYPE = 13 defined in qcom_ipqsoc.h
+- id = <1>         : First PPE port (EDMA start_ports=1, ports=2)
+- xgmac            : Required for 10G mac_speed calculation in ipq_eth_port_set_up()
