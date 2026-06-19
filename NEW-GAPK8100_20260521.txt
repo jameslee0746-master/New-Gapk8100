@@ -1731,3 +1731,5 @@ eth_device (레거시)                        udevice DM (Driver Model)
 - phy_type = <13>  : RTL8373_SWITCH_TYPE = 13 defined in qcom_ipqsoc.h
 - id = <1>         : First PPE port (EDMA start_ports=1, ports=2)
 - xgmac            : Required for 10G mac_speed calculation in ipq_eth_port_set_up()
+
+nss-switch.c -> ipq_eth_ofdata_to_platdata()가 phy-handle0 phandle을 통해 uniphy_id, phy_addr, phy_type, id 등을 읽습니다
